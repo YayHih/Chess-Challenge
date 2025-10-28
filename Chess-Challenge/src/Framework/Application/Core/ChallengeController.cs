@@ -1,5 +1,6 @@
 ﻿using ChessChallenge.Chess;
 using ChessChallenge.Example;
+using ChessChallenge.PastBots;
 using Raylib_cs;
 using System;
 using System.IO;
@@ -19,7 +20,9 @@ namespace ChessChallenge.Application
         {
             Human,
             MyBot,
-            EvilBot
+            EvilBot,
+            BotV1_0,
+            BotV2_0
         }
 
         // Game state
@@ -42,6 +45,9 @@ namespace ChessChallenge.Application
         public BotMatchStats BotStatsA { get; private set; }
         public BotMatchStats BotStatsB {get;private set;}
         bool botAPlaysWhite;
+        BotVersionManager.BotVersion versionBotA;
+        BotVersionManager.BotVersion versionBotB;
+        bool isVersionMatch;
 
 
         // Bot task
@@ -210,6 +216,8 @@ namespace ChessChallenge.Application
             {
                 PlayerType.MyBot => new ChessPlayer(new MyBot(), type, GameDurationMilliseconds),
                 PlayerType.EvilBot => new ChessPlayer(new EvilBot(), type, GameDurationMilliseconds),
+                PlayerType.BotV1_0 => new ChessPlayer(new BotV1_0(), type, GameDurationMilliseconds),
+                PlayerType.BotV2_0 => new ChessPlayer(new BotV2_0(), type, GameDurationMilliseconds),
                 _ => new ChessPlayer(new HumanPlayer(boardUI), type)
             };
         }
@@ -317,7 +325,10 @@ namespace ChessChallenge.Application
         {
             if (originalGameID == gameID)
             {
-                StartNewGame(PlayerBlack.PlayerType, PlayerWhite.PlayerType);
+                if (isVersionMatch)
+                    StartVersionGame(versionBotA, versionBotB);
+                else
+                    StartNewGame(PlayerBlack.PlayerType, PlayerWhite.PlayerType);
             }
             timer.Close();
         }
@@ -382,8 +393,8 @@ namespace ChessChallenge.Application
         public void Draw()
         {
             boardUI.Draw();
-            string nameW = GetPlayerName(PlayerWhite);
-            string nameB = GetPlayerName(PlayerBlack);
+            string nameW = GetPlayerNameWithVersion(PlayerWhite);
+            string nameB = GetPlayerNameWithVersion(PlayerBlack);
             boardUI.DrawPlayerNames(nameW, nameB, PlayerWhite.TimeRemainingMs, PlayerBlack.TimeRemainingMs, isPlaying);
         }
 
@@ -397,8 +408,27 @@ namespace ChessChallenge.Application
         static string GetPlayerName(ChessPlayer player) => GetPlayerName(player.PlayerType);
         static string GetPlayerName(PlayerType type) => type.ToString();
 
+        static string GetPlayerNameWithVersion(ChessPlayer player)
+        {
+            string baseName = GetPlayerName(player);
+            if (player.IsBot && player.Bot != null)
+            {
+                string botTypeName = player.Bot.GetType().Name;
+                if (botTypeName != baseName && botTypeName != "MyBot")
+                {
+                    return $"{baseName} ({botTypeName})";
+                }
+                else if (botTypeName != baseName)
+                {
+                    return botTypeName;
+                }
+            }
+            return baseName;
+        }
+
         public void StartNewBotMatch(PlayerType botTypeA, PlayerType botTypeB)
         {
+            isVersionMatch = false;
             EndGame(GameResult.DrawByArbiter, log: false, autoStartNextBotMatch: false);
             botMatchGameIndex = 0;
             string nameA = GetPlayerName(botTypeA);
@@ -413,6 +443,53 @@ namespace ChessChallenge.Application
             botAPlaysWhite = true;
             Log($"Starting new match: {nameA} vs {nameB}", false, ConsoleColor.Blue);
             StartNewGame(botTypeA, botTypeB);
+        }
+
+        public void StartBotVersionMatch(BotVersionManager.BotVersion botA, BotVersionManager.BotVersion botB)
+        {
+            isVersionMatch = true;
+            versionBotA = botA;
+            versionBotB = botB;
+            EndGame(GameResult.DrawByArbiter, log: false, autoStartNextBotMatch: false);
+            botMatchGameIndex = 0;
+            BotStatsA = new BotMatchStats(botA.Name);
+            BotStatsB = new BotMatchStats(botB.Name);
+            botAPlaysWhite = true;
+            Log($"Starting new match: {botA.Name} vs {botB.Name}", false, ConsoleColor.Blue);
+            StartVersionGame(botA, botB);
+        }
+
+        void StartVersionGame(BotVersionManager.BotVersion botA, BotVersionManager.BotVersion botB)
+        {
+            EndGame(GameResult.DrawByArbiter, log: false, autoStartNextBotMatch: false);
+            gameID = rng.Next();
+
+            if (RunBotsOnSeparateThread)
+            {
+                botTaskWaitHandle.Set();
+                botTaskWaitHandle = new AutoResetEvent(false);
+                Task.Factory.StartNew(BotThinkerThread, TaskCreationOptions.LongRunning);
+            }
+
+            board = new Board();
+            int fenIndex = botMatchGameIndex / 2;
+            board.LoadPosition(botMatchStartFens[fenIndex]);
+
+            PlayerWhite = botAPlaysWhite ? CreateVersionPlayer(botA) : CreateVersionPlayer(botB);
+            PlayerBlack = botAPlaysWhite ? CreateVersionPlayer(botB) : CreateVersionPlayer(botA);
+
+            boardUI.UpdatePosition(board);
+            boardUI.ResetSquareColours();
+            boardUI.SetPerspective(true);
+
+            isPlaying = true;
+            NotifyTurnToMove();
+        }
+
+        ChessPlayer CreateVersionPlayer(BotVersionManager.BotVersion version)
+        {
+            var bot = BotVersionManager.CreateBotInstance(version);
+            return new ChessPlayer(bot, PlayerType.MyBot, GameDurationMilliseconds);
         }
 
 

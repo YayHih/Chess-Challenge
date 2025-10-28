@@ -1,4 +1,4 @@
-﻿using Raylib_cs;
+using Raylib_cs;
 using System.Numerics;
 using System;
 using System.IO;
@@ -15,19 +15,65 @@ namespace ChessChallenge.Application
             float breakSpacing = spacing * 0.6f;
 
             // Game Buttons
-            if (NextButtonInRow("Human vs MyBot", ref buttonPos, spacing, buttonSize))
+            var currentBot = BotVersionManager.GetCurrentVersion();
+            if (NextButtonInRow($"Human vs {currentBot.Name}", ref buttonPos, spacing, buttonSize))
             {
                 var whiteType = controller.HumanWasWhiteLastGame ? ChallengeController.PlayerType.MyBot : ChallengeController.PlayerType.Human;
                 var blackType = !controller.HumanWasWhiteLastGame ? ChallengeController.PlayerType.MyBot : ChallengeController.PlayerType.Human;
                 controller.StartNewGame(whiteType, blackType);
             }
-            if (NextButtonInRow("MyBot vs MyBot", ref buttonPos, spacing, buttonSize))
-            {
-                controller.StartNewBotMatch(ChallengeController.PlayerType.MyBot, ChallengeController.PlayerType.MyBot);
-            }
-            if (NextButtonInRow("MyBot vs EvilBot", ref buttonPos, spacing, buttonSize))
+
+            if (NextButtonInRow($"{currentBot.Name} vs EvilBot", ref buttonPos, spacing, buttonSize))
             {
                 controller.StartNewBotMatch(ChallengeController.PlayerType.MyBot, ChallengeController.PlayerType.EvilBot);
+            }
+
+            // Version Selector A
+            var selectedBotA = BotVersionManager.GetSelectedVersion();
+            string selectorTextA = $"< {selectedBotA.Name} >";
+
+            Vector2 arrowSize = UIHelper.Scale(new Vector2(55, 55));
+            Vector2 centerSize = UIHelper.Scale(new Vector2(150, 55));
+            Vector2 leftArrowPos = buttonPos;
+            Vector2 centerPos = new Vector2(buttonPos.X + arrowSize.X + 5, buttonPos.Y);
+            Vector2 rightArrowPos = new Vector2(centerPos.X + centerSize.X + 5, buttonPos.Y);
+
+            if (UIHelper.Button("<", leftArrowPos, arrowSize))
+            {
+                BotVersionManager.CycleSelectedVersion(false);
+            }
+            UIHelper.DrawText(selectorTextA, new Vector2(centerPos.X + centerSize.X / 2, centerPos.Y + centerSize.Y / 2),
+                UIHelper.ScaleInt(32), 1, new Color(180, 180, 180, 255), UIHelper.AlignH.Centre, UIHelper.AlignV.Centre);
+            if (UIHelper.Button(">", rightArrowPos, arrowSize))
+            {
+                BotVersionManager.CycleSelectedVersion(true);
+            }
+            buttonPos.Y += spacing;
+
+            // Version Selector B
+            var selectedBotB = BotVersionManager.GetSelectedVersionB();
+            string selectorTextB = $"< {selectedBotB.Name} >";
+
+            leftArrowPos = buttonPos;
+            centerPos = new Vector2(buttonPos.X + arrowSize.X + 5, buttonPos.Y);
+            rightArrowPos = new Vector2(centerPos.X + centerSize.X + 5, buttonPos.Y);
+
+            if (UIHelper.Button("<", leftArrowPos, arrowSize))
+            {
+                BotVersionManager.CycleSelectedVersionB(false);
+            }
+            UIHelper.DrawText(selectorTextB, new Vector2(centerPos.X + centerSize.X / 2, centerPos.Y + centerSize.Y / 2),
+                UIHelper.ScaleInt(32), 1, new Color(180, 180, 180, 255), UIHelper.AlignH.Centre, UIHelper.AlignV.Centre);
+            if (UIHelper.Button(">", rightArrowPos, arrowSize))
+            {
+                BotVersionManager.CycleSelectedVersionB(true);
+            }
+            buttonPos.Y += spacing;
+
+            // Match Button
+            if (NextButtonInRow($"{selectedBotA.Name} vs {selectedBotB.Name}", ref buttonPos, spacing, buttonSize))
+            {
+                controller.StartBotVersionMatch(selectedBotA, selectedBotB);
             }
 
             // Page buttons
