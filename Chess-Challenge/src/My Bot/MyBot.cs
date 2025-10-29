@@ -1,313 +1,185 @@
-
 using ChessChallenge.API;
-using System.Collections.Generic;
-using System.Linq;
+using System;
 
 
-//Apologies about my poor coding practices. This is my first time using C sharp, and I'm still new to OOP more generally.
-//Good luck TacTxs!
-
-
-//Apologies about my poor coding practices. This is my first time using C sharp, and I'm still new to OOP more generally.
-
-public class MyBot : IChessBot
-{
-    Timer timer;
-    Board board;
-    Dictionary<ulong, TranspositionTableEntry> transpositionTable;
-    double[,] squareValues = {
-        //Pawn Value
-        {
-              0,   0,   0,   0,
-            150, 150, 150, 150,
-            110, 110, 120, 130,
-            105, 105, 110, 125,
-            100, 100, 100, 120,
-            105,  95,  90, 100,
-            105, 110, 110,  80,
-              0,   0,   0,   0
-        },
-        //Knight Value
-        {
-            270, 280, 290, 290,
-            280, 300, 320, 320,
-            290, 320, 330, 335,
-            290, 325, 335, 340,
-            290, 320, 335, 340,
-            290, 325, 330, 335,
-            280, 300, 320, 325,
-            270, 280, 290, 290
-        },
-        //Bishop Value
-        {
-            310, 320, 320, 320,
-            320, 330, 330, 330,
-            320, 330, 335, 340,
-            320, 335, 335, 340,
-            320, 330, 340, 340,
-            320, 340, 340, 340,
-            320, 335, 330, 330,
-            310, 320, 320, 320
-        },
-        //Rook Value
-        {
-            500, 500, 500, 500,
-            505, 510, 510, 510,
-            495, 500, 500, 500,
-            495, 500, 500, 500,
-            495, 500, 500, 500,
-            495, 500, 500, 500,
-            495, 500, 500, 500,
-            500, 500, 500, 505
-        },
-        //Queen Value
-        {
-            880, 890, 890, 895,
-            890, 900, 900, 900,
-            890, 900, 905, 905,
-            895, 900, 905, 905,
-            898, 900, 905, 905,
-            890, 903, 905, 905,
-            890, 900, 903, 900,
-            880, 890, 890, 895
-        },
-        //King Value
-        {
-             70,  60,  60,  50,
-             70,  60,  60,  50,
-             70,  60,  60,  50,
-             70,  60,  60,  50,
-             80,  70,  70,  60,
-             90,  80,  80,  80,
-            120, 120, 100, 100,
-            120, 130, 110, 100
-        }
-    };
-
-    //Which square some piece is associated with for the purpsoes of the squareValues lookup table
-    public int PieceSquare(Piece piece)
+    public class MyBot : IChessBot
     {
-        int square_of_piece = piece.Square.Index;
+        struct E { public ulong k; public Move m; public int s, d, f; }
+        int[] pieceValues = { 0, 100, 320, 330, 500, 900, 10000 };
+        E[] tt = new E[1 << 20];
+        int[,] h = new int[64, 64];
+        int prevScore;
 
-        //Directionalise based on white vs black pieces
-        square_of_piece = piece.IsWhite ? 63 - square_of_piece : square_of_piece;
-
-        //Symmetrise the chess board
-        return square_of_piece - (square_of_piece % 8 * 2 - 7) * (square_of_piece / 4 % 2) - square_of_piece / 8 * 4;
-    }
-
-    //Board Evaluation: Defined to be the evaluation of the player whose turn it is.
-    public double BoardEvaluation()
-    {
-
-        if (board.IsInCheckmate())
+        public Move Think(Board b, Timer t)
         {
-            //Game loss: value neg inf
-            return -100000;
-        }
-        if (board.IsDraw() || board.IsRepeatedPosition())
-        {
-            //Game draw: value = 0
-            return 0;
-        }
-
-        double BoardEval = 0.0;
-        for (int i = 2; i < 14; i++)
-        {
-            PieceList PList = board.GetPieceList((PieceType)(i / 2), i % 2 == 0);
-
-            //Individual Pieces Eval
-            for (int j = 0; j < PList.Count; j++)
+            Move bestMove = Move.NullMove;
+            for (int depth = 1; depth <= 64; depth++)
             {
-                //Update the board's eval based on the colour of the piece and the colour of the player's turn multiplied by the value of the piece (based on the squareValues lookup table)
-                BoardEval += (i % 2 == 0 == board.IsWhiteToMove ? 1 : -1) * squareValues[i / 2 - 1, PieceSquare(PList.GetPiece(j))];
+                int alpha = prevScore - 20, beta = prevScore + 20;
+                int score = Search(b, depth, 0, alpha, beta);
+                if (Math.Abs(score - prevScore) >= 20) 
+                    score = Search(b, depth, 0, -30000, 30000);
+                prevScore = score;
+                int index = (int)(b.ZobristKey & 0xFFFFF);
+                if (tt[index].k == b.ZobristKey) bestMove = tt[index].m;
+                if (t.MillisecondsElapsedThisTurn > t.MillisecondsRemaining / 40) break;
             }
+            return bestMove.IsNull ? b.GetLegalMoves()[0] : bestMove;
         }
 
-        return BoardEval;
-    }
-
-    //Heuristic for prioritising move search ordering
-    double OrderingMovesPriority(Move move, Move? searchThisMoveFirst)
-    {
-        double priority_score = 0;
-        Piece startPiece = board.GetPiece(move.StartSquare);
-
-        //Captures should be searched earlier
-        if ((int)move.CapturePieceType > 0)
+        int Search(Board b, int depth, int ply, int alpha, int beta, bool nullMoveUsed = false)
         {
-            //...especially if the piece is undefended
-            priority_score -= board.SquareIsAttackedByOpponent(move.TargetSquare) ? 110 : 1110;
-
-            Piece targetPiece = board.GetPiece(move.TargetSquare);
-
-            //Need to treat enpassant separately, as for this move the target piece is not on the target square. So just fix the hardcoded value of enpassant.
-            priority_score -= move.IsEnPassant ? 30 : squareValues[(int)targetPiece.PieceType - 1, PieceSquare(targetPiece)] - squareValues[(int)startPiece.PieceType - 1, PieceSquare(startPiece)];
-        }
-
-        //Prioritise checks
-        board.MakeMove(move);
-        priority_score -= board.IsInCheck() ? 150 : 0;
-        board.UndoMove(move);
-
-        //If previously decided a move is to be searched first, then give it first priority. Else prioritise promotions
-        priority_score -= move.Equals(searchThisMoveFirst) ? 10000 : move.IsPromotion ? 800 : 0;
-        return priority_score;
-    }
-
-    //Search the move space
-    (Move?, double) Search(int depth, int max_depth, double alphaBestPlayerMoveScore, double betaBestOpponentMoveScore, bool CapturesOnly)
-    {
-        //If there is a check, search all moves, even if otherwise would have only done "CapturesOnly"
-        bool effectiveCapturesOnly = CapturesOnly && !board.IsInCheck();
-        double optimum_eval = -3000000; //neg inf
-        Move? optimum_move = null;
-
-        if (depth < max_depth || CapturesOnly)
-        {
-            Move? searchThisMoveFirst = null;
-
-            //See if already evaluated position
-            if (transpositionTable.TryGetValue(board.ZobristKey, out TranspositionTableEntry? entry))
+            int index = (int)(b.ZobristKey & 0xFFFFF);
+            if (ply > 0 && b.IsRepeatedPosition()) return 0;
+            E entry = tt[index];
+            bool inCheck = b.IsInCheck(), isPV = alpha + 1 != beta;
+            
+            if (ply > 0 && entry.k == b.ZobristKey && entry.d >= depth && Math.Abs(entry.s) < 9000 &&
+                (entry.f == 1 || entry.f == 2 && entry.s >= beta || entry.f == 3 && entry.s <= alpha)) 
+                return entry.s;
+            
+            if (depth <= 0) return inCheck ? Search(b, 1, ply, alpha, beta) : Quiesce(b, alpha, beta);
+            
+            int eval = Evaluate(b);
+            
+            // Reverse Futility Pruning
+            if (!isPV && !inCheck && depth <= 3 && eval - 58 * depth >= beta) return eval;
+            
+            // Null Move Pruning
+            if (!nullMoveUsed && depth > 2 && !inCheck && eval >= beta) 
+            { 
+                b.ForceSkipTurn(); 
+                int nullScore = -Search(b, depth - 3, ply + 1, -beta, -beta + 1, true); 
+                b.UndoSkipTurn(); 
+                if (nullScore >= beta) return beta; 
+            }
+            
+            Span<Move> moves = stackalloc Move[218];
+            b.GetLegalMovesNonAlloc(ref moves);
+            if (moves.Length == 0) return inCheck ? ply - 30000 : 0;
+            
+            Move hashMove = entry.k == b.ZobristKey ? entry.m : Move.NullMove;
+            Span<int> scores = stackalloc int[moves.Length];
+            
+            // Move ordering
+            for (int i = 0; i < moves.Length; i++)
             {
-                //todo. Check alpha, beta
-                if (entry.depth >= max_depth - depth || CapturesOnly)
+                Move m = moves[i];
+                scores[i] = m == hashMove ? 9000000 : 
+                           m.IsCapture ? 1000000 + 10 * pieceValues[(int)m.CapturePieceType] - pieceValues[(int)m.MovePieceType] :
+                           m.IsPromotion ? 900000 : h[m.StartSquare.Index, m.TargetSquare.Index];
+            }
+            
+            // Sort moves
+            for (int i = 0; i < moves.Length - 1; i++)
+            {
+                int bestIdx = i;
+                for (int j = i + 1; j < moves.Length; j++) 
+                    if (scores[j] > scores[bestIdx]) bestIdx = j;
+                (moves[i], moves[bestIdx]) = (moves[bestIdx], moves[i]);
+                (scores[i], scores[bestIdx]) = (scores[bestIdx], scores[i]);
+            }
+            
+            Move bestMove = Move.NullMove; 
+            int bestScore = -30000, oldAlpha = alpha;
+            
+            for (int i = 0; i < moves.Length; i++)
+            {
+                Move m = moves[i];
+                b.MakeMove(m);
+                
+                int extension = b.IsInCheck() ? 1 : 0;
+                int reduction = i > 3 && depth > 2 && !b.IsInCheck() && !m.IsCapture && !m.IsPromotion ?
+                    Math.Max(0, (i * 93 + depth * 144) / 1000 - scores[i] / 10000) : 0;
+                
+                int score;
+                if (i == 0)
                 {
-                    return (entry.Optimove, entry.value_best);
-                }
-
-                //If already evaluated this position, recall the best move in order to search it first at greater depth
-                searchThisMoveFirst = entry.Optimove;
-            }
-
-            //Get all possible moves (captures) ordered according to heuristic
-            Move[] moves = board.GetLegalMoves(effectiveCapturesOnly).OrderBy(x => OrderingMovesPriority(x, searchThisMoveFirst)).ToArray();
-
-            //If terminal node, evaluate the board
-            if (moves.Length == 0 || board.IsDraw())
-            {
-                return (optimum_move, BoardEvaluation());
-            }
-
-            //Else iterate through moves and evaluate each recursively
-            for (int i = -1; i < moves.Length; i++)
-            {
-                //Begin with the null move evaluating the board as is (only applicable for "CapturesOnly" search - as it is important to check what happens if the opponent doesn't make a 'bad' capture)
-                if (i < 0)
-                {
-                    if (effectiveCapturesOnly)
-                    {
-                        optimum_eval = BoardEvaluation();
-                    }
+                    score = -Search(b, depth - 1 + extension, ply + 1, -beta, -alpha);
                 }
                 else
                 {
-                    //For each move, make the move on the board and search the subnodes to estimate the position evaluation
-                    board.MakeMove(moves[i]);
-
-                    double node_evaluation = -Search(depth + 1, max_depth, -betaBestOpponentMoveScore, -alphaBestPlayerMoveScore, CapturesOnly).Item2;
-                    //Negative because the better moves are the ones with a worse resulting board situation for the opponent
-                    //Similarly, reverse alpha and beta as the "player" and "opponent" states have swapped
-
-                    //If the current eval is the best yet seen, update the current champion move/eval.
-                    if (node_evaluation > optimum_eval)
+                    score = -Search(b, depth - 1 - reduction + extension, ply + 1, -alpha - 1, -alpha);
+                    if (score > alpha && reduction > 0)
+                        score = -Search(b, depth - 1 + extension, ply + 1, -alpha - 1, -alpha);
+                    if (score > alpha && score < beta)
+                        score = -Search(b, depth - 1 + extension, ply + 1, -beta, -alpha);
+                }
+                
+                b.UndoMove(m);
+                
+                if (score > bestScore)
+                {
+                    bestScore = score; 
+                    bestMove = m; 
+                    alpha = Math.Max(alpha, score);
+                    
+                    if (alpha >= beta)
                     {
-                        optimum_move = moves[i];
-                        optimum_eval = node_evaluation;
+                        if (!m.IsCapture)
+                        {
+                            int bonus = depth * depth;
+                            int startIdx = m.StartSquare.Index, targetIdx = m.TargetSquare.Index;
+                            h[startIdx, targetIdx] += bonus - bonus * h[startIdx, targetIdx] / 512;
+                            
+                            for (int j = 0; j < i; j++)
+                                if (!moves[j].IsCapture)
+                                {
+                                    int s1 = moves[j].StartSquare.Index, s2 = moves[j].TargetSquare.Index;
+                                    h[s1, s2] -= bonus + bonus * h[s1, s2] / 512;
+                                }
+                        }
+                        break;
                     }
-                    //Undo the move to preserve the board state
-                    board.UndoMove(moves[i]);
                 }
-
-                //Alphabeta pruning. If the current eval is better than a higher level's eval, the opponent would never pick this move. So stop searching
-                if (optimum_eval >= betaBestOpponentMoveScore)
-                {
-                    break;
-                }
-
-                //Abandon the search if time is running out
-                if (TimerCheckFail())
-                {
-                    optimum_eval = -1000000; //This node should be considered offlimits as it has not finished being searched.
-                    break;
-                }
-
-                //If the current eval is the best ever seen, update the current champion evaluation.
-                if (optimum_eval > alphaBestPlayerMoveScore)
-                {
-                    alphaBestPlayerMoveScore = optimum_eval;
-                }
+                
+                // Futility pruning
+                if (!isPV && depth <= 4 && !m.IsCapture && eval + 127 * depth < alpha) break;
             }
+            
+            tt[index] = new E { 
+                k = b.ZobristKey, 
+                m = bestMove, 
+                s = bestScore, 
+                d = depth, 
+                f = bestScore >= beta ? 2 : bestScore > oldAlpha ? 1 : 3 
+            };
+            
+            return bestScore;
         }
-        else
+
+        int Quiesce(Board b, int alpha, int beta, int depth = 0)
         {
-            //When reached max_depth, continue searching captures to fully evaluate position (rather than just evaluating the board presently)
-            (optimum_move, optimum_eval) = Search(depth, max_depth, alphaBestPlayerMoveScore, betaBestOpponentMoveScore, true);
-        }
-
-        //Store the node result in the lookup table
-        transpositionTable[board.ZobristKey] = new TranspositionTableEntry(optimum_eval, max_depth - depth, optimum_move);
-
-        //Return the best move and associated eval
-        return (optimum_move, optimum_eval);
-
-    }
-
-    //Determine if there is insufficient time to keep searching
-    bool TimerCheckFail()
-    {
-        if (timer.MillisecondsRemaining > timer.GameStartTimeMilliseconds * 0.4)
-        {
-            return timer.MillisecondsElapsedThisTurn > timer.GameStartTimeMilliseconds / 45 + 1.5 * timer.IncrementMilliseconds;
-        }
-        return timer.MillisecondsElapsedThisTurn > timer.MillisecondsRemaining / 15 + timer.IncrementMilliseconds;
-    }
-
-    public Move Think(Board board, Timer timer)
-    {
-        //globalise the board and transposition lookup tables
-        this.board = board;
-        this.timer = timer;
-        this.transpositionTable = new Dictionary<ulong, TranspositionTableEntry>();
-
-        Move? optimum_move = null;
-        double move_eval = 0;
-        int max_depth = 5;
-
-        //iteratively deepen the seach from depth 1 upwards, recording the best move each time so if the search gets cancelled the best move is still output
-        for (int searchDepth = 1; searchDepth <= max_depth; searchDepth++)
-        {
-            //the best moves according the current depth
-            (optimum_move, move_eval) = Search(0, searchDepth, -2000000, 2000000, false);
-
-            //if the eval is mate or running out of time, don't search deeper
-            if (move_eval > 10000 || move_eval < -10000 || TimerCheckFail())
+            if (depth > 10) return Evaluate(b);
+            int eval = Evaluate(b);
+            if (eval >= beta) return beta;
+            alpha = Math.Max(alpha, eval);
+            
+            Span<Move> captures = stackalloc Move[218];
+            b.GetLegalMovesNonAlloc(ref captures, true);
+            
+            foreach (Move m in captures)
             {
-                break;
+                if (eval + pieceValues[(int)m.CapturePieceType] + 200 < alpha) continue;
+                b.MakeMove(m);
+                int score = -Quiesce(b, -beta, -alpha, depth + 1);
+                b.UndoMove(m);
+                if (score >= beta) return beta;
+                alpha = Math.Max(alpha, score);
             }
-            //Use more time if available to go to greater depth
-            if (searchDepth == max_depth && 80 * timer.MillisecondsElapsedThisTurn < timer.MillisecondsRemaining + 60 * timer.IncrementMilliseconds)
-            {
-                max_depth += 1;
-            }
+            return alpha;
         }
 
-        //What it all amounts to
-        return (Move)optimum_move;
+        int Evaluate(Board b)
+        {
+            int material = 0;
+            for (int pieceType = 1; pieceType < 7; pieceType++)
+            {
+                ulong ourPieces = b.GetPieceBitboard((PieceType)pieceType, b.IsWhiteToMove);
+                ulong theirPieces = b.GetPieceBitboard((PieceType)pieceType, !b.IsWhiteToMove);
+                material += (BitboardHelper.GetNumberOfSetBits(ourPieces) - 
+                           BitboardHelper.GetNumberOfSetBits(theirPieces)) * pieceValues[pieceType];
+            }
+            return material;
+        }
     }
-}
-
-
-//The attributes of the transposition table entries: the node value, the depth at which this node occurred, and the best move to search first if deeper searches are to be made.
-public class TranspositionTableEntry
-{
-    public double value_best;
-    public int depth;
-    public Move? Optimove;
-    public TranspositionTableEntry(double value_best_, int depth_, Move? Optimove_)
-    {
-        value_best = value_best_;
-        depth = depth_;
-        Optimove = Optimove_;
-    }
-}
