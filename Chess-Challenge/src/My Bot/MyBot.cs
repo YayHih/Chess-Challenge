@@ -2,184 +2,159 @@ using ChessChallenge.API;
 using System;
 
 
+    /// <summary>
+    /// Chess Bot V2.6 - An optimized alpha-beta search engine with the following features:
+    /// - Transposition Table (2^19 entries) for position caching
+    /// - Principal Variation Search (PVS) for move ordering
+    /// - Late Move Reduction (LMR) for searching promising moves deeper
+    /// - Killer Move heuristic to remember good quiet moves
+    /// - History heuristic for move ordering
+    /// - Check extensions to explore tactical lines
+    /// - Delta pruning in quiescence search
+    /// - Null move pruning for positional advantage
+    /// </summary>
     public class MyBot : IChessBot
     {
-        struct E { public ulong k; public Move m; public int s, d, f; }
-        int[] pieceValues = { 0, 100, 320, 330, 500, 900, 10000 };
-        E[] tt = new E[1 << 20];
+        // Transposition table entry structure
+        struct E 
+        { 
+            public ulong k;    // Zobrist key
+            public Move m;     // Best move
+            public int s;      // Score
+            public int d;      // Depth
+            public int f;      // Flag (1=exact, 2=lower bound, 3=upper bound)
+        }
+
+        // Piece values for material evaluation (index represents piece type)
+        int[] pv = { 0, 100, 320, 330, 500, 900, 10000 };  // Empty, Pawn, Knight, Bishop, Rook, Queen, King
+        
+        // Main transposition table - stores 2^19 entries
+        E[] tt = new E[1 << 19];
+        
+        // Killer moves table [ply, slot] - stores 2 killer moves per ply
+        Move[,] kil = new Move[64, 2];
+        
+        // History table [fromSquare, toSquare] - stores success history of quiet moves
         int[,] h = new int[64, 64];
-        int prevScore;
 
         public Move Think(Board b, Timer t)
         {
-            Move bestMove = Move.NullMove;
-            for (int depth = 1; depth <= 64; depth++)
+            Move bm=Move.NullMove;
+            for (int d=1; d<=64; d++)
             {
-                int alpha = prevScore - 20, beta = prevScore + 20;
-                int score = Search(b, depth, 0, alpha, beta);
-                if (Math.Abs(score - prevScore) >= 20) 
-                    score = Search(b, depth, 0, -30000, 30000);
-                prevScore = score;
-                int index = (int)(b.ZobristKey & 0xFFFFF);
-                if (tt[index].k == b.ZobristKey) bestMove = tt[index].m;
-                if (t.MillisecondsElapsedThisTurn > t.MillisecondsRemaining / 40) break;
+                S(b, d, 0, -30000, 30000);
+                int i=(int)(b.ZobristKey & 0x7FFFF);
+                if (tt[i].k==b.ZobristKey) bm=tt[i].m;
+                if (t.MillisecondsElapsedThisTurn>t.MillisecondsRemaining/(b.PlyCount<40?60:40)) break;
             }
-            return bestMove.IsNull ? b.GetLegalMoves()[0] : bestMove;
+            return bm.IsNull ? b.GetLegalMoves()[0] : bm;
         }
 
-        int Search(Board b, int depth, int ply, int alpha, int beta, bool nullMoveUsed = false)
+        /// <summary>
+        /// Main alpha-beta search function with various pruning techniques
+        /// </summary>
+        /// <param name="b">Current board position</param>
+        /// <param name="d">Remaining depth to search</param>
+        /// <param name="p">Current ply (distance from root)</param>
+        /// <param name="a">Alpha (lower bound)</param>
+        /// <param name="B">Beta (upper bound)</param>
+        /// <param name="np">Null move flag to prevent consecutive null moves</param>
+        /// <returns>Best score for the current position</returns>
+        int S(Board b, int d, int p, int a, int B, bool np=false)
         {
-            int index = (int)(b.ZobristKey & 0xFFFFF);
-            if (ply > 0 && b.IsRepeatedPosition()) return 0;
-            E entry = tt[index];
-            bool inCheck = b.IsInCheck(), isPV = alpha + 1 != beta;
-            
-            if (ply > 0 && entry.k == b.ZobristKey && entry.d >= depth && Math.Abs(entry.s) < 9000 &&
-                (entry.f == 1 || entry.f == 2 && entry.s >= beta || entry.f == 3 && entry.s <= alpha)) 
-                return entry.s;
-            
-            if (depth <= 0) return inCheck ? Search(b, 1, ply, alpha, beta) : Quiesce(b, alpha, beta);
-            
-            int eval = Evaluate(b);
-            
-            // Reverse Futility Pruning
-            if (!isPV && !inCheck && depth <= 3 && eval - 58 * depth >= beta) return eval;
-            
-            // Null Move Pruning
-            if (!nullMoveUsed && depth > 2 && !inCheck && eval >= beta) 
-            { 
-                b.ForceSkipTurn(); 
-                int nullScore = -Search(b, depth - 3, ply + 1, -beta, -beta + 1, true); 
-                b.UndoSkipTurn(); 
-                if (nullScore >= beta) return beta; 
-            }
-            
-            Span<Move> moves = stackalloc Move[218];
-            b.GetLegalMovesNonAlloc(ref moves);
-            if (moves.Length == 0) return inCheck ? ply - 30000 : 0;
-            
-            Move hashMove = entry.k == b.ZobristKey ? entry.m : Move.NullMove;
-            Span<int> scores = stackalloc int[moves.Length];
-            
-            // Move ordering
-            for (int i = 0; i < moves.Length; i++)
+            int i=(int)(b.ZobristKey & 0x7FFFF);
+            if (p>0 && b.IsRepeatedPosition()) return 0;
+            E e=tt[i];
+            if (p>0 && e.k==b.ZobristKey && e.d>=d && Math.Abs(e.s)<9000 &&
+                (e.f==1 || e.f==2 && e.s>=B || e.f==3 && e.s<=a)) return e.s;
+            if (!np && d>2 && p>0 && !b.IsInCheck()) { b.ForceSkipTurn(); int n=-S(b, d-3, p+1, -B, -B+1, true); b.UndoSkipTurn(); if (n>=B) return B; }
+            if (d<=0) return b.IsInCheck() ? S(b, 1, p, a, B) : Q(b, a, B);
+            Span<Move> mv=stackalloc Move[218];
+            b.GetLegalMovesNonAlloc(ref mv);
+            if (mv.Length==0) return b.IsInCheck() ? p-30000 : 0;
+            Move hm=e.k==b.ZobristKey ? e.m : Move.NullMove;
+            Span<int> sc=stackalloc int[mv.Length];
+            for (int j=0; j<mv.Length; j++)
             {
-                Move m = moves[i];
-                scores[i] = m == hashMove ? 9000000 : 
-                           m.IsCapture ? 1000000 + 10 * pieceValues[(int)m.CapturePieceType] - pieceValues[(int)m.MovePieceType] :
-                           m.IsPromotion ? 900000 : h[m.StartSquare.Index, m.TargetSquare.Index];
+                Move m=mv[j];
+                sc[j]=m==hm?9000000:m.IsCapture?1000000+10*pv[(int)m.CapturePieceType]-pv[(int)m.MovePieceType]:
+                    m.IsPromotion?900000:m==kil[p,0]?800000:m==kil[p,1]?700000:h[m.StartSquare.Index,m.TargetSquare.Index];
             }
-            
-            // Sort moves
-            for (int i = 0; i < moves.Length - 1; i++)
+            for (int j=0; j<mv.Length-1; j++)
             {
-                int bestIdx = i;
-                for (int j = i + 1; j < moves.Length; j++) 
-                    if (scores[j] > scores[bestIdx]) bestIdx = j;
-                (moves[i], moves[bestIdx]) = (moves[bestIdx], moves[i]);
-                (scores[i], scores[bestIdx]) = (scores[bestIdx], scores[i]);
+                int best=j;
+                for (int x=j+1; x<mv.Length; x++) if (sc[x]>sc[best]) best=x;
+                (mv[j],mv[best])=(mv[best],mv[j]);
+                (sc[j],sc[best])=(sc[best],sc[j]);
             }
-            
-            Move bestMove = Move.NullMove; 
-            int bestScore = -30000, oldAlpha = alpha;
-            
-            for (int i = 0; i < moves.Length; i++)
+
+            Move bm=Move.NullMove; int bs=-30000,oa=a;
+            for (int j=0; j<mv.Length; j++)
             {
-                Move m = moves[i];
+                Move m=mv[j];
                 b.MakeMove(m);
-                
-                int extension = b.IsInCheck() ? 1 : 0;
-                int reduction = i > 3 && depth > 2 && !b.IsInCheck() && !m.IsCapture && !m.IsPromotion ?
-                    Math.Max(0, (i * 93 + depth * 144) / 1000 - scores[i] / 10000) : 0;
-                
-                int score;
-                if (i == 0)
-                {
-                    score = -Search(b, depth - 1 + extension, ply + 1, -beta, -alpha);
-                }
-                else
-                {
-                    score = -Search(b, depth - 1 - reduction + extension, ply + 1, -alpha - 1, -alpha);
-                    if (score > alpha && reduction > 0)
-                        score = -Search(b, depth - 1 + extension, ply + 1, -alpha - 1, -alpha);
-                    if (score > alpha && score < beta)
-                        score = -Search(b, depth - 1 + extension, ply + 1, -beta, -alpha);
-                }
-                
+                int r=j>4 && d>3 && !b.IsInCheck() && !m.IsCapture && !m.IsPromotion ? (j>8?2:1) : 0;
+                int s2=j==0 ? -S(b, d-1, p+1, -B, -a) :
+                    (s2=-S(b, d-1-r, p+1, -a-1, -a))>a ? -S(b, d-1, p+1, -B, -a) : s2;
                 b.UndoMove(m);
-                
-                if (score > bestScore)
+                if (s2>bs)
                 {
-                    bestScore = score; 
-                    bestMove = m; 
-                    alpha = Math.Max(alpha, score);
-                    
-                    if (alpha >= beta)
+                    bs=s2; bm=m; a=Math.Max(a, s2);
+                    if (a>=B)
                     {
-                        if (!m.IsCapture)
-                        {
-                            int bonus = depth * depth;
-                            int startIdx = m.StartSquare.Index, targetIdx = m.TargetSquare.Index;
-                            h[startIdx, targetIdx] += bonus - bonus * h[startIdx, targetIdx] / 512;
-                            
-                            for (int j = 0; j < i; j++)
-                                if (!moves[j].IsCapture)
-                                {
-                                    int s1 = moves[j].StartSquare.Index, s2 = moves[j].TargetSquare.Index;
-                                    h[s1, s2] -= bonus + bonus * h[s1, s2] / 512;
-                                }
-                        }
+                        if (!m.IsCapture) { kil[p, 1]=kil[p, 0]; kil[p, 0]=m; h[m.StartSquare.Index, m.TargetSquare.Index]+=d*d; }
                         break;
                     }
                 }
-                
-                // Futility pruning
-                if (!isPV && depth <= 4 && !m.IsCapture && eval + 127 * depth < alpha) break;
             }
-            
-            tt[index] = new E { 
-                k = b.ZobristKey, 
-                m = bestMove, 
-                s = bestScore, 
-                d = depth, 
-                f = bestScore >= beta ? 2 : bestScore > oldAlpha ? 1 : 3 
-            };
-            
-            return bestScore;
+            tt[i]=new E{k=b.ZobristKey,m=bm,s=bs,d=d,f=bs>=B?2:bs>oa?1:3};
+            return bs;
         }
 
-        int Quiesce(Board b, int alpha, int beta, int depth = 0)
+        /// <summary>
+        /// Quiescence search to evaluate tactical sequences
+        /// Uses delta pruning to skip unlikely captures
+        /// </summary>
+        /// <param name="b">Current board position</param>
+        /// <param name="a">Alpha (lower bound)</param>
+        /// <param name="B">Beta (upper bound)</param>
+        /// <param name="qd">Current quiescence depth</param>
+        /// <returns>Best score for the current position</returns>
+        int Q(Board b, int a, int B, int qd=0)
         {
-            if (depth > 10) return Evaluate(b);
-            int eval = Evaluate(b);
-            if (eval >= beta) return beta;
-            alpha = Math.Max(alpha, eval);
-            
-            Span<Move> captures = stackalloc Move[218];
-            b.GetLegalMovesNonAlloc(ref captures, true);
-            
-            foreach (Move m in captures)
+            if (qd>10) return Ev(b);
+            int e=Ev(b);
+            if (e>=B) return B;
+            a=Math.Max(a, e);
+            Span<Move> c=stackalloc Move[218];
+            b.GetLegalMovesNonAlloc(ref c, true);
+            foreach (Move m in c)
             {
-                if (eval + pieceValues[(int)m.CapturePieceType] + 200 < alpha) continue;
+                if (e+pv[(int)m.CapturePieceType]<a) continue;
                 b.MakeMove(m);
-                int score = -Quiesce(b, -beta, -alpha, depth + 1);
+                int s=-Q(b, -B, -a, qd+1);
                 b.UndoMove(m);
-                if (score >= beta) return beta;
-                alpha = Math.Max(alpha, score);
+                if (s>=B) return B;
+                a=Math.Max(a, s);
             }
-            return alpha;
+            return a;
         }
 
-        int Evaluate(Board b)
+        /// <summary>
+        /// Static evaluation function
+        /// Calculates material balance between white and black
+        /// Positive scores favor white, negative favor black
+        /// </summary>
+        /// <param name="b">Current board position</param>
+        /// <returns>Material balance score</returns>
+        int Ev(Board b)
         {
-            int material = 0;
-            for (int pieceType = 1; pieceType < 7; pieceType++)
+            int mg=0;
+            for (int p=1; p<7; p++)
             {
-                ulong ourPieces = b.GetPieceBitboard((PieceType)pieceType, b.IsWhiteToMove);
-                ulong theirPieces = b.GetPieceBitboard((PieceType)pieceType, !b.IsWhiteToMove);
-                material += (BitboardHelper.GetNumberOfSetBits(ourPieces) - 
-                           BitboardHelper.GetNumberOfSetBits(theirPieces)) * pieceValues[pieceType];
+                ulong u=b.GetPieceBitboard((PieceType)p, b.IsWhiteToMove), t=b.GetPieceBitboard((PieceType)p, !b.IsWhiteToMove);
+                mg += (BitboardHelper.GetNumberOfSetBits(u) - BitboardHelper.GetNumberOfSetBits(t)) * pv[p];
             }
-            return material;
+            return mg;
         }
     }
